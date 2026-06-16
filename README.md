@@ -353,11 +353,79 @@ app/memory/session_state.json
 Поддерживаемые ключи требований:
 
 ```text
+plan_mode
+activity_source
 base_table
 case_id
 activity
 timestamp
+start_time
+stop_time
 ```
+
+## Режим: каждый файл как activity
+
+Для сценария, где в папке `data/` лежит много event-таблиц, и каждая таблица означает отдельный этап процесса, используется отдельный режим:
+
+```text
+plan_mode = event_tables_concat
+activity_source = table_name
+```
+
+В этом режиме агент не делает большой join между всеми файлами. Он читает каждый файл как источник событий, подбирает `case_id` и `timestamp` отдельно для каждого файла, а `activity` берет из имени файла.
+
+Например:
+
+```text
+application_created.csv  -> activity = application_created
+contract_signed.csv      -> activity = contract_signed
+payment_received.csv     -> activity = payment_received
+```
+
+Итоговый event log собирается через `concat`:
+
+```text
+case_id | activity | activity_id | timestamp | start_time | stop_time | source_table
+```
+
+Пример фразы для чата:
+
+```text
+Собери event log. Имя таблицы это activity_id.
+```
+
+После такой фразы парсер включит:
+
+```json
+{
+  "plan_mode": "event_tables_concat",
+  "activity_source": "table_name"
+}
+```
+
+Пример `join_plan.json` для этого режима:
+
+```json
+{
+  "status": "ok",
+  "mode": "event_tables_concat",
+  "activity_source": "table_name",
+  "event_sources": [
+    {
+      "file": "application_created.csv",
+      "activity": "application_created",
+      "activity_source": "table_name",
+      "case_id": "application_id",
+      "timestamp": "created_at",
+      "start_time": "created_at",
+      "stop_time": "created_at"
+    }
+  ],
+  "joins": []
+}
+```
+
+Этот режим лучше подходит для 10-20 и более файлов с разными именами полей, если каждый файл уже является отдельным типом события. Join в таком случае нужен только для обогащения справочниками, а не для создания самих событий.
 
 ## Выходные файлы
 

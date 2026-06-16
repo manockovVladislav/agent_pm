@@ -1,3 +1,6 @@
+from pathlib import Path
+
+
 def _normalize_column_name(value: str) -> str:
     return str(value).strip().lower().replace(" ", "_").replace("-", "_")
 
@@ -107,6 +110,232 @@ def choose_base_table(tables_info: dict) -> str | None:
     return candidates[0]["table_name"]
 
 
+def _table_name_to_activity(table_name: str) -> str:
+    return Path(table_name).stem
+
+
+def _is_event_tables_concat_mode(user_requirements: dict) -> bool:
+    plan_mode = str(user_requirements.get("plan_mode", "")).strip().lower()
+    activity_source = str(user_requirements.get("activity_source", "")).strip().lower()
+
+    return (
+        plan_mode in {"event_tables_concat", "events_concat", "concat"}
+        or activity_source in {"table_name", "file_name", "filename"}
+    )
+
+
+def _pick_event_source_column(
+    table_info: dict,
+    role: str,
+    requested_column: str | None,
+    preferred_names: list[str],
+    used_columns: set[str] | None = None,
+) -> tuple[str | None, str | None]:
+    columns = table_info.get("columns", [])
+
+    if requested_column:
+        resolved_column = _resolve_column(requested_column, columns)
+
+        if resolved_column in columns:
+            return resolved_column, None
+
+        warning = (
+            f"{table_info.get('file_name')}: колонка {role}={requested_column} "
+            "не найдена, использован автоматический подбор."
+        )
+    else:
+        warning = None
+
+    candidate_key = {
+        "case_id": "candidate_case_id_columns",
+        "timestamp": "candidate_timestamp_columns",
+        "start_time": "candidate_timestamp_columns",
+        "stop_time": "candidate_timestamp_columns",
+    }[role]
+
+    return (
+        _pick_column(
+            table_info.get(candidate_key, []),
+            preferred_names=preferred_names,
+            used_columns=used_columns,
+        ),
+        warning,
+    )
+
+
+def build_event_tables_concat_plan(
+    tables_info: dict,
+    user_requirements: dict | None = None,
+) -> dict:
+    """
+    Строит план, где каждый файл является источником событий.
+
+    В этом режиме activity берется из имени файла, а case_id/timestamp
+    подбираются отдельно для каждой таблицы.
+    """
+
+    user_requirements = user_requirements or {}
+    event_sources = []
+    warnings = []
+    errors = []
+
+    for table_name, table_info in tables_info.items():
+        if "error" in table_info:
+            warnings.append(f"{table_name}: таблица пропущена, ошибка чтения.")
+            continue
+
+        used_columns = set()
+
+        case_id_col, warning = _pick_event_source_column(
+            table_info=table_info,
+            role="case_id",
+            requested_column=user_requirements.get("case_id"),
+            preferred_names=[
+                "case_id",
+                "caseid",
+                "request_id",
+                "application_id",
+                "app_id",
+                "deal_id",
+                "id",
+            ],
+            used_columns=used_columns,
+        )
+
+        if warning:
+            warnings.append(warning)
+
+        if case_id_col:
+            used_columns.add(case_id_col)
+
+        timestamp_col, warning = _pick_event_source_column(
+            table_info=table_info,
+            role="timestamp",
+            requested_column=user_requirements.get("timestamp"),
+            preferred_names=[
+                "timestamp",
+                "event_time",
+                "created_at",
+                "updated_at",
+                "date",
+                "time",
+                "start_time",
+                "stop_time",
+            ],
+            used_columns=used_columns,
+        )
+
+        if warning:
+            warnings.append(warning)
+
+        if timestamp_col:
+            used_columns.add(timestamp_col)
+
+        start_time_col, _ = _pick_event_source_column(
+            table_info=table_info,
+            role="start_time",
+            requested_column=user_requirements.get("start_time"),
+            preferred_names=[
+                "start_time",
+                "started_at",
+                "created_at",
+                "timestamp",
+                "date",
+            ],
+            used_columns=None,
+        )
+
+        stop_time_col, _ = _pick_event_source_column(
+            table_info=table_info,
+            role="stop_time",
+            requested_column=user_requirements.get("stop_time"),
+            preferred_names=[
+                "stop_time",
+                "finished_at",
+                "ended_at",
+                "updated_at",
+                "timestamp",
+                "date",
+            ],
+            used_columns=None,
+        )
+
+        source = {
+            "file": table_name,
+            "activity": _table_name_to_activity(table_name),
+            "activity_source": "table_name",
+            "case_id": case_id_col,
+            "timestamp": timestamp_col,
+            "start_time": start_time_col,
+            "stop_time": stop_time_col,
+            "rows": table_info.get("rows"),
+        }
+
+        if not case_id_col:
+            errors.append(f"{table_name}: не удалось определить case_id.")
+
+        if not timestamp_col:
+            errors.append(f"{table_name}: не удалось определить timestamp.")
+
+        event_sources.append(source)
+
+    if not event_sources:
+        return {
+            "status": "error",
+            "mode": "event_tables_concat",
+            "error": "Не найдено таблиц для сборки event log через concat.",
+            "event_sources": [],
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+    if errors:
+        return {
+            "status": "error",
+            "mode": "event_tables_concat",
+            "error": "Не все event-таблицы имеют обязательные поля.",
+            "event_sources": event_sources,
+            "event_log_columns": {
+                "case_id": "case_id",
+                "activity": "activity",
+                "activity_id": "activity_id",
+                "timestamp": "timestamp",
+                "start_time": "start_time",
+                "stop_time": "stop_time",
+            },
+            "joins": [],
+            "warnings": warnings,
+            "errors": errors,
+        }
+
+    return {
+        "status": "ok",
+        "mode": "event_tables_concat",
+        "activity_source": "table_name",
+        "base_table": None,
+        "event_sources": event_sources,
+        "event_log_columns": {
+            "case_id": "case_id",
+            "activity": "activity",
+            "activity_id": "activity_id",
+            "timestamp": "timestamp",
+            "start_time": "start_time",
+            "stop_time": "stop_time",
+        },
+        "joins": [],
+        "warnings": warnings,
+        "output_columns": {
+            "case_id": "case_id",
+            "activity": "activity",
+            "activity_id": "activity_id",
+            "timestamp": "timestamp",
+            "start_time": "start_time",
+            "stop_time": "stop_time",
+            "source_table": "source_table",
+        },
+    }
+
+
 def build_join_plan(
     tables_info: dict,
     relationships: list[dict],
@@ -122,6 +351,13 @@ def build_join_plan(
     """
 
     user_requirements = user_requirements or {}
+
+    if _is_event_tables_concat_mode(user_requirements):
+        return build_event_tables_concat_plan(
+            tables_info=tables_info,
+            user_requirements=user_requirements,
+        )
+
     base_table = user_requirements.get("base_table") or choose_base_table(tables_info)
 
     if base_table is None:
@@ -244,6 +480,7 @@ def build_join_plan(
 
     join_plan = {
         "status": "ok",
+        "mode": "joined_table",
         "base_table": base_table,
         "event_log_columns": {
             "case_id": case_id_col,

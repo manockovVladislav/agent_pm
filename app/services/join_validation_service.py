@@ -20,6 +20,96 @@ def _key_stats(df: pd.DataFrame, key: str) -> dict:
     }
 
 
+def _validate_event_tables_concat_plan(join_plan: dict, tables_info: dict) -> dict:
+    report = {
+        "status": "ok",
+        "mode": "event_tables_concat",
+        "checks": [],
+        "warnings": list(join_plan.get("warnings", [])),
+        "errors": list(join_plan.get("errors", [])),
+        "total_joins": 0,
+        "total_event_sources": len(join_plan.get("event_sources", [])),
+        "base_rows": None,
+    }
+
+    if join_plan.get("status") != "ok":
+        report["status"] = "error"
+        error = join_plan.get("error", "Некорректный event_tables_concat plan.")
+
+        if error not in report["errors"]:
+            report["errors"].append(error)
+
+        return report
+
+    total_rows = 0
+
+    for source in join_plan.get("event_sources", []):
+        table_name = source["file"]
+        case_id_col = source.get("case_id")
+        timestamp_col = source.get("timestamp")
+
+        check = {
+            "file": table_name,
+            "activity": source.get("activity"),
+            "case_id": case_id_col,
+            "timestamp": timestamp_col,
+            "status": "ok",
+        }
+
+        if table_name not in tables_info:
+            check["status"] = "error"
+            check["error"] = f"Таблица не найдена: {table_name}"
+            report["checks"].append(check)
+            report["errors"].append(check["error"])
+            continue
+
+        df = read_table(tables_info[table_name]["path"])
+        columns = set(df.columns)
+        check["rows"] = int(len(df))
+        total_rows += len(df)
+
+        missing_columns = [
+            column for column in [case_id_col, timestamp_col]
+            if not column or column not in columns
+        ]
+
+        if missing_columns:
+            check["status"] = "error"
+            check["error"] = f"Нет обязательных колонок: {missing_columns}"
+            report["checks"].append(check)
+            report["errors"].append(f"{table_name}: {check['error']}")
+            continue
+
+        check["case_id_stats"] = _key_stats(df, case_id_col)
+        check["missing_timestamp_rows"] = int(df[timestamp_col].isna().sum())
+        check["invalid_timestamp_rows"] = int(
+            pd.to_datetime(df[timestamp_col], errors="coerce").isna().sum()
+        )
+
+        if check["case_id_stats"]["missing_key_rows"] > 0:
+            report["warnings"].append(
+                f"{table_name}: пропуски case_id: "
+                f"{check['case_id_stats']['missing_key_rows']} строк."
+            )
+
+        if check["invalid_timestamp_rows"] > 0:
+            report["warnings"].append(
+                f"{table_name}: невалидные timestamp: "
+                f"{check['invalid_timestamp_rows']} строк."
+            )
+
+        report["checks"].append(check)
+
+    report["final_rows_after_joins"] = int(total_rows)
+
+    if report["errors"]:
+        report["status"] = "error"
+    elif report["warnings"]:
+        report["status"] = "warning"
+
+    return report
+
+
 def validate_join_plan(
     join_plan: dict,
     tables_info: dict,
@@ -40,6 +130,12 @@ def validate_join_plan(
         "errors": [],
         "total_joins": len(join_plan.get("joins", [])),
     }
+
+    if join_plan.get("mode") == "event_tables_concat":
+        return _validate_event_tables_concat_plan(
+            join_plan=join_plan,
+            tables_info=tables_info,
+        )
 
     if join_plan.get("status") != "ok":
         report["status"] = "error"

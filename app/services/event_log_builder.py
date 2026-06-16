@@ -24,6 +24,24 @@ def _rename_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _preserve_reserved_columns(
+    df: pd.DataFrame,
+    reserved_columns: list[str],
+    source_columns: list[str],
+) -> pd.DataFrame:
+    rename_map = {}
+    source_columns = set(source_columns)
+
+    for column in reserved_columns:
+        if column in df.columns and column not in source_columns:
+            rename_map[column] = f"{column}_source_attr"
+
+    if rename_map:
+        return df.rename(columns=rename_map)
+
+    return df
+
+
 def execute_join_plan(
     join_plan: dict,
     tables_info: dict,
@@ -67,6 +85,128 @@ def execute_join_plan(
     result_df = _rename_duplicate_columns(result_df)
 
     return result_df
+
+
+def execute_event_tables_concat_plan(
+    join_plan: dict,
+    tables_info: dict,
+) -> pd.DataFrame:
+    """
+    Собирает event log из набора event-таблиц.
+
+    Каждая таблица является отдельным типом активности, а activity берется
+    из имени файла.
+    """
+
+    if join_plan.get("status") != "ok":
+        raise ValueError(f"Некорректный join_plan: {join_plan}")
+
+    event_frames = []
+
+    for source in join_plan.get("event_sources", []):
+        table_name = source["file"]
+        table_path = tables_info[table_name]["path"]
+        source_df = read_table(table_path)
+
+        case_id_col = source["case_id"]
+        timestamp_col = source["timestamp"]
+        start_time_col = source.get("start_time")
+        stop_time_col = source.get("stop_time")
+        activity = source["activity"]
+
+        required_columns = [
+            case_id_col,
+            timestamp_col,
+        ]
+        missing_columns = [
+            column for column in required_columns
+            if column not in source_df.columns
+        ]
+
+        if missing_columns:
+            raise ValueError(
+                f"{table_name}: нет обязательных колонок: {missing_columns}"
+            )
+
+        source_columns = [
+            case_id_col,
+            timestamp_col,
+            start_time_col,
+            stop_time_col,
+        ]
+        source_columns = [column for column in source_columns if column]
+
+        event_df = _preserve_reserved_columns(
+            source_df.copy(),
+            reserved_columns=[
+                "case_id",
+                "activity",
+                "activity_id",
+                "timestamp",
+                "start_time",
+                "stop_time",
+                "source_table",
+                "source_row_number",
+            ],
+            source_columns=source_columns,
+        )
+
+        event_df["case_id"] = source_df[case_id_col]
+        event_df["activity"] = activity
+        event_df["activity_id"] = activity
+        event_df["timestamp"] = pd.to_datetime(
+            source_df[timestamp_col],
+            errors="coerce",
+        )
+
+        if start_time_col and start_time_col in source_df.columns:
+            event_df["start_time"] = pd.to_datetime(
+                source_df[start_time_col],
+                errors="coerce",
+            )
+        else:
+            event_df["start_time"] = event_df["timestamp"]
+
+        if stop_time_col and stop_time_col in source_df.columns:
+            event_df["stop_time"] = pd.to_datetime(
+                source_df[stop_time_col],
+                errors="coerce",
+            )
+        else:
+            event_df["stop_time"] = event_df["timestamp"]
+
+        event_df["source_table"] = table_name
+        event_df["source_row_number"] = range(1, len(event_df) + 1)
+
+        event_frames.append(event_df)
+
+    if not event_frames:
+        return pd.DataFrame(
+            columns=[
+                "case_id",
+                "activity",
+                "activity_id",
+                "timestamp",
+                "start_time",
+                "stop_time",
+                "source_table",
+                "source_row_number",
+            ]
+        )
+
+    event_log = pd.concat(event_frames, ignore_index=True, sort=False)
+
+    event_log = event_log.sort_values(
+        by=[
+            "case_id",
+            "timestamp",
+            "source_table",
+            "source_row_number",
+        ],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    return event_log
 
 
 def build_event_log_from_joined_df(

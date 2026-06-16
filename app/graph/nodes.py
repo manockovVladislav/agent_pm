@@ -13,6 +13,7 @@ from app.services.session_service import (
 from app.services.event_log_builder import (
     execute_join_plan,
     build_event_log_from_joined_df,
+    execute_event_tables_concat_plan,
 )
 from app.services.validation_service import validate_event_log
 from app.services.output_service import save_outputs
@@ -101,15 +102,21 @@ def execute_join_plan_node(state):
         }
 
     try:
-        joined_df = execute_join_plan(
-            join_plan=join_plan,
-            tables_info=state["tables_info"],
-        )
+        if join_plan.get("mode") == "event_tables_concat":
+            event_log = execute_event_tables_concat_plan(
+                join_plan=join_plan,
+                tables_info=state["tables_info"],
+            )
+        else:
+            joined_df = execute_join_plan(
+                join_plan=join_plan,
+                tables_info=state["tables_info"],
+            )
 
-        event_log = build_event_log_from_joined_df(
-            joined_df=joined_df,
-            join_plan=join_plan,
-        )
+            event_log = build_event_log_from_joined_df(
+                joined_df=joined_df,
+                join_plan=join_plan,
+            )
     except Exception as error:
         return {
             "event_log": None,

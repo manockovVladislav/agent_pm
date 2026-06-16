@@ -121,13 +121,32 @@ def build_final_answer(
     lines.append("Предварительный join_plan:")
 
     if join_plan.get("status") == "ok":
-        lines.append(f"- базовая таблица: {join_plan['base_table']}")
-        lines.append(f"- case_id: {join_plan['event_log_columns']['case_id']}")
-        lines.append(f"- activity: {join_plan['event_log_columns']['activity']}")
-        lines.append(f"- timestamp: {join_plan['event_log_columns']['timestamp']}")
-        lines.append(f"- join-операций: {len(join_plan.get('joins', []))}")
+        mode = join_plan.get("mode", "joined_table")
+        lines.append(f"- режим: {mode}")
+
+        if mode == "event_tables_concat":
+            lines.append("- activity: имя файла")
+            lines.append(f"- источников событий: {len(join_plan.get('event_sources', []))}")
+
+            for source in join_plan.get("event_sources", [])[:10]:
+                lines.append(
+                    f"- {source['file']}: activity={source['activity']}, "
+                    f"case_id={source.get('case_id')}, "
+                    f"timestamp={source.get('timestamp')}"
+                )
+        else:
+            lines.append(f"- базовая таблица: {join_plan['base_table']}")
+            lines.append(f"- case_id: {join_plan['event_log_columns']['case_id']}")
+            lines.append(f"- activity: {join_plan['event_log_columns']['activity']}")
+            lines.append(f"- timestamp: {join_plan['event_log_columns']['timestamp']}")
+            lines.append(f"- join-операций: {len(join_plan.get('joins', []))}")
     else:
+        if join_plan.get("mode"):
+            lines.append(f"- режим: {join_plan.get('mode')}")
         lines.append(f"- ошибка: {join_plan.get('error')}")
+
+        for error in join_plan.get("errors", [])[:5]:
+            lines.append(f"- error: {error}")
 
     lines.append("")
 
@@ -135,11 +154,21 @@ def build_final_answer(
     if join_validation_report:
         lines.append(f"- статус: {join_validation_report.get('status')}")
         lines.append(f"- join-операций: {join_validation_report.get('total_joins')}")
+
+        if join_validation_report.get("mode") == "event_tables_concat":
+            lines.append(
+                "- источников событий: "
+                f"{join_validation_report.get('total_event_sources')}"
+            )
+
         lines.append(f"- предупреждений: {len(join_validation_report.get('warnings', []))}")
         lines.append(f"- ошибок: {len(join_validation_report.get('errors', []))}")
 
         for warning in join_validation_report.get("warnings", [])[:5]:
             lines.append(f"- warning: {warning}")
+
+        for error in join_validation_report.get("errors", [])[:5]:
+            lines.append(f"- error: {error}")
     else:
         lines.append("- join_plan пока не проверен")
 

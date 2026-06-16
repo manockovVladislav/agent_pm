@@ -13,10 +13,14 @@ ALLOWED_ACTIONS = {
 }
 
 ALLOWED_REQUIREMENT_KEYS = {
+    "plan_mode",
+    "activity_source",
     "base_table",
     "case_id",
     "activity",
     "timestamp",
+    "start_time",
+    "stop_time",
 }
 
 
@@ -116,7 +120,10 @@ def build_agent_decision_prompt(
             "",
             "Правила:",
             "- Не выдумывай названия таблиц и колонок. Используй только columns из tables.",
-            "- Если предлагаешь rebuild_join_plan, заполни requirements только ключами: base_table, case_id, activity, timestamp.",
+            "- Если каждый файл является отдельным событием/этапом, используй requirements: "
+            "plan_mode=event_tables_concat, activity_source=table_name.",
+            "- Если предлагаешь rebuild_join_plan, заполни requirements только разрешенными ключами: "
+            "plan_mode, activity_source, base_table, case_id, activity, timestamp, start_time, stop_time.",
             "- Если не уверен, используй ask_user.",
             "- Если достигнут max_agent_iterations, используй accept или ask_user.",
             "- Верни только JSON без markdown.",
