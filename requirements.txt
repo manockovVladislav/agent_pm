@@ -1,0 +1,8 @@
+pandas
+openpyxl
+ipywidgets
+langgraph
+torch
+transformers
+networkx
+pyvis
