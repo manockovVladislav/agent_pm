@@ -1,10 +1,12 @@
-# Process Mining Event Log Agent
+# Агент сборки event log для process mining
 
-Jupyter-based agent for building and validating an event log from CSV/XLSX tables.
+Проект содержит Jupyter-агента, который собирает и проверяет event log из CSV/XLSX-таблиц.
 
-The main artifact is `outputs/join_plan.json`: it records how the event log was assembled, can be reviewed, corrected, repeated, and explained.
+Главный артефакт системы - не только `outputs/event_log.xlsx`, а `outputs/join_plan.json`. В нем описано, как именно был собран event log: какие таблицы использовались, какие связи найдены, какие поля выбраны для `case_id`, `activity`, `timestamp`, и какие предупреждения появились при join.
 
-## Project Structure
+`join_plan.json` можно проверить, исправить, повторить и объяснить. Поэтому он важнее, чем разовый итоговый Excel-файл.
+
+## Структура проекта
 
 ```text
 agent_pm/
@@ -22,15 +24,32 @@ agent_pm/
 └── requirements.txt
 ```
 
-## Setup
+Назначение основных папок:
+
+- `demo.ipynb` - точка запуска в Jupyter.
+- `data/` - локальные исходные CSV/XLSX-файлы.
+- `outputs/` - отчеты, event log, join plan и HTML-граф процесса.
+- `app/agent.py` - основной класс агента.
+- `app/config.py` - настройки проекта и LLM.
+- `app/graph/` - LangGraph-сценарий и состояния.
+- `app/services/` - работа с файлами, профилирование таблиц, join, проверки качества, LLM.
+- `app/ui/` - чат-виджет для Jupyter.
+- `app/visualization/` - визуализация process graph.
+- `app/memory/` - runtime-память сессии.
+
+## Установка
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Put source `.csv` or `.xlsx` files into `data/`.
+Виртуальное окружение проект сам не создает. Если оно нужно, его можно создать отдельно, но в архитектуру агента оно не входит.
 
-Run `demo.ipynb` and start the chat:
+Исходные `.csv` или `.xlsx` файлы нужно положить в папку `data/`.
+
+## Запуск в Jupyter
+
+В `demo.ipynb` остается простой код:
 
 ```python
 from app.agent import ProcessMiningDataAgent
@@ -48,9 +67,21 @@ chat = AgentChatWidget(
 chat.show()
 ```
 
-## LLM Configuration
+После запуска можно писать требования в чат:
 
-All LLM settings live in `app/config.py`.
+```text
+Собери event log.
+```
+
+Или сразу уточнять поля:
+
+```text
+case_id бери из application_id, activity из operation_name, timestamp из created_at.
+```
+
+## Настройка LLM
+
+Все настройки LLM находятся в `app/config.py`.
 
 ```python
 LLM_BACKEND = "cobolt_cpp"
@@ -61,30 +92,43 @@ LLM_DECISION_MAX_NEW_TOKENS = 300
 KOBOLD_CPP_TIMEOUT_SECONDS = 60
 ```
 
-Use local Cobolt/KoboldCpp for testing:
+Для локального тестирования через Cobolt/KoboldCpp:
 
 ```python
 LLM_BACKEND = "cobolt_cpp"
 ```
 
-Use Qwen for production-style local inference:
+Для боевого локального запуска через Qwen:
 
 ```python
 LLM_BACKEND = "qwen"
 QWEN_MODEL_PATH = "/path/to/qwen3"
 ```
 
-Qwen and Cobolt use the same internal interface:
+Qwen и Cobolt подключены через один внутренний интерфейс:
 
 ```python
 generate(prompt: str, max_new_tokens: int) -> str
 ```
 
-## Agent Flow
+Это сделано специально: все, что связано с Cobolt, можно будет убрать без переписывания графа и бизнес-логики. Основной код агента не должен знать, какая именно модель стоит за LLM-интерфейсом.
 
-LangGraph controls the workflow. Pandas does the data work. The LLM makes a structured decision after quality checks.
+## Общая архитектура
 
-Current graph:
+В системе роли разделены так:
+
+- LangGraph управляет шагами процесса.
+- pandas выполняет расчеты, join и сборку event log.
+- Qwen/Cobolt помогает понять требования пользователя и принять следующее действие.
+- `session_state.json` хранит память текущей сессии.
+- Jupyter Widget дает интерфейс общения.
+- `ProcessGraphViewer` показывает итоговый процесс.
+
+LLM не делает join и не изменяет таблицы напрямую. Она возвращает структурированное решение, а код уже применяет это решение через обычные Python-сервисы.
+
+## Процесс работы агента
+
+Текущий граф выполнения:
 
 ```text
 START
@@ -105,13 +149,28 @@ START
 END
 ```
 
-The loop is bounded by `max_agent_iterations` so the agent cannot rebuild forever.
+Смысл шагов:
 
-## Agent Decisions
+- `load_session` - загружает память прошлых требований и решений.
+- `parse_requirements` - извлекает явные требования из текста пользователя.
+- `scan_data` - ищет CSV/XLSX-файлы в `data/`.
+- `profile_tables` - читает таблицы и собирает информацию о колонках.
+- `infer_relationships` - ищет возможные связи между таблицами.
+- `build_join_plan` - строит план сборки event log.
+- `validate_join_plan` - проверяет риски join.
+- `execute_join_plan` - собирает event log через pandas.
+- `validate_event_log` - проверяет качество event log.
+- `decide_next_action` - решает, что делать дальше.
+- `apply_agent_decision` - применяет правки требований, если нужен пересбор.
+- `save_outputs` - сохраняет артефакты в `outputs/`.
+- `save_session` - обновляет память сессии.
+- `generate_answer` - формирует ответ в чат.
 
-The LLM is not used for joins or calculations. It is used to choose the next process action.
+Цикл пересборки ограничен через `max_agent_iterations`, чтобы агент не мог бесконечно перестраивать event log.
 
-The decision node asks the model for strict JSON:
+## Решения агента
+
+После проверок качества агент выбирает следующее действие. Решение приходит в строгом JSON-формате:
 
 ```json
 {
@@ -122,7 +181,7 @@ The decision node asks the model for strict JSON:
 }
 ```
 
-Allowed actions:
+Допустимые действия:
 
 ```text
 accept
@@ -130,7 +189,26 @@ rebuild_join_plan
 ask_user
 ```
 
-If `action = rebuild_join_plan`, the model may return corrected requirements:
+### `accept`
+
+Агент принимает текущий результат, сохраняет файлы и отвечает пользователю.
+
+Пример:
+
+```json
+{
+  "action": "accept",
+  "requirements": {},
+  "reason": "Критических ошибок нет. Статус join_plan: warning. Статус event_log: ok.",
+  "user_message": "Event log собран и проверен."
+}
+```
+
+### `rebuild_join_plan`
+
+Агент считает, что event log нужно пересобрать с другими требованиями.
+
+Пример:
 
 ```json
 {
@@ -146,63 +224,87 @@ If `action = rebuild_join_plan`, the model may return corrected requirements:
 }
 ```
 
-Then LangGraph applies these requirements and returns to `build_join_plan`.
+После этого LangGraph применяет новые требования и возвращается к `build_join_plan`.
 
-If `action = ask_user`, the agent stops the rebuild loop and returns a user-facing clarification request.
+### `ask_user`
 
-If the model is unavailable or returns invalid JSON, the system falls back to deterministic rules.
+Агент не может безопасно принять решение без уточнения пользователя.
 
-## State and Memory
+Пример:
 
-The active graph state is defined in `app/graph/state.py`.
-
-Important fields:
-
-```text
-user_question              raw user query
-session_state              loaded session memory
-parsed_requirements        explicit requirements parsed from user text
-user_requirements          active requirements after session merge
-agent_iteration            current rebuild iteration
-max_agent_iterations       rebuild limit
-agent_decision             latest structured model/rules decision
-agent_decision_history     list of decisions in this run
-files                      scanned source files
-tables_info                table profiles
-relationships              inferred table relationships
-join_plan                  current join plan
-join_validation_report     join quality checks
-event_log                  pandas DataFrame
-validation_report          event log quality checks
-output_paths               saved artifacts
-session_path               memory path
-answer                     final chat answer
+```json
+{
+  "action": "ask_user",
+  "requirements": {},
+  "reason": "Нельзя однозначно выбрать activity: найдено несколько похожих колонок.",
+  "user_message": "Уточните, какое поле использовать как activity."
+}
 ```
 
-Session memory is stored in:
+Если модель недоступна или возвращает невалидный JSON, система использует детерминированные fallback-правила.
+
+## Состояние графа
+
+Активное состояние описано в `app/graph/state.py`.
+
+Основные поля:
+
+```text
+user_question              исходный текст пользователя
+session_state              загруженная память сессии
+parsed_requirements        требования, найденные в текущем сообщении
+user_requirements          активные требования после объединения с памятью
+agent_iteration            номер текущей итерации пересборки
+max_agent_iterations       лимит итераций пересборки
+agent_decision             последнее структурированное решение агента
+agent_decision_history     история решений в текущем запуске
+files                      найденные исходные файлы
+tables_info                профили таблиц
+relationships              найденные связи между таблицами
+join_plan                  текущий план join
+join_validation_report     отчет проверки join
+event_log                  pandas DataFrame с event log
+validation_report          отчет проверки event log
+output_paths               пути к сохраненным файлам
+session_path               путь к файлу памяти
+answer                     итоговый ответ в чат
+```
+
+Это состояние живет внутри одного запуска графа. После завершения часть данных сохраняется в память сессии.
+
+## Память сессии
+
+Память хранится в файле:
 
 ```text
 app/memory/session_state.json
 ```
 
-It stores the last plan, reports, outputs, active requirements, and decision history.
+Туда попадает:
 
-The session is not reset automatically before every request. This is intentional:
-user corrections such as `case_id бери из application_id` must survive into the
-next graph run. Reset the session only when starting an independent scenario,
-changing the dataset, or preparing a clean demo:
+- активные требования пользователя;
+- последний `join_plan`;
+- последний отчет проверки join;
+- последний отчет проверки event log;
+- пути к последним артефактам;
+- история решений агента;
+- краткая история запусков.
+
+Память не очищается автоматически перед каждым запросом. Это сделано намеренно: если пользователь написал `case_id бери из application_id`, это требование должно сохраниться и применяться в следующих запусках.
+
+Сбрасывать память нужно только когда начинается новый независимый сценарий, меняется набор данных или нужно подготовить чистое демо:
 
 ```python
 agent.reset_session()
 ```
 
-`app/memory/session_state.json` is runtime state and is excluded from git.
+`app/memory/session_state.json` является runtime-состоянием и не должен попадать в git.
 
-## How "Reasoning" Is Represented
+## Как выглядят размышления агента
 
-The system does not store or expose hidden chain-of-thought.
+Система не сохраняет и не показывает скрытую цепочку рассуждений модели.
 
-Instead, it stores structured operational reasoning:
+Вместо этого используется объяснимое рабочее решение в структурированном виде:
 
 ```json
 {
@@ -213,37 +315,42 @@ Instead, it stores structured operational reasoning:
 }
 ```
 
-This is the agent's auditable decision record:
+Это и есть прикладные "размышления" агента для боевой системы:
 
-- what it decided;
-- which requirements it changed, if any;
-- why it made that decision;
-- what message should be shown to the user.
+- какое действие выбрано;
+- какие требования изменены;
+- почему выбрано это действие;
+- что нужно показать пользователю.
 
-Decision records are available in:
+Последнее решение можно посмотреть так:
 
 ```python
 agent.get_last_state()["agent_decision"]
+```
+
+Историю решений текущего запуска:
+
+```python
 agent.get_last_state()["agent_decision_history"]
 ```
 
-And persisted in:
+Последняя история также сохраняется в:
 
-```json
+```text
 app/memory/session_state.json
 ```
 
-## User Corrections
+## Правки пользователя
 
-The user can correct requirements in chat:
+Пользователь может исправлять требования прямо в чате:
 
 ```text
 Нет, case_id бери из application_id, activity из operation_name, timestamp из created_at.
 ```
 
-The rule-based parser extracts obvious field assignments. The agent then merges them into session requirements and rebuilds the event log.
+Парсер требований извлекает очевидные назначения полей. Затем агент объединяет их с памятью сессии и пересобирает event log.
 
-Supported requirement keys:
+Поддерживаемые ключи требований:
 
 ```text
 base_table
@@ -252,11 +359,11 @@ activity
 timestamp
 ```
 
-## Outputs
+## Выходные файлы
 
-Generated files are saved to `outputs/`.
+Сгенерированные файлы сохраняются в `outputs/`.
 
-Important outputs:
+Основные файлы:
 
 ```text
 join_plan.json
@@ -270,34 +377,34 @@ join_quality_report.xlsx
 process_graph.html
 ```
 
-`join_plan.json` is the primary artifact for review and correction.
+`join_plan.json` - основной файл для проверки и исправления.
 
-## Quality Checks
+## Проверки качества
 
-Join checks:
+Проверки join:
 
-- row growth after join;
-- many-to-many joins;
-- row loss after join;
-- duplicate join keys;
-- missing join keys.
+- разрастание строк после join;
+- many-to-many join;
+- потеря строк после join;
+- дубли ключей;
+- пропуски в ключах join.
 
-Event log checks:
+Проверки event log:
 
-- required columns;
-- missing `case_id`, `activity`, `timestamp`;
-- invalid dates;
-- duplicate events;
-- negative durations;
-- cases with one event;
-- missing common stages;
-- repeated returns;
-- rare routes;
-- duration outliers.
+- наличие обязательных колонок;
+- пропуски в `case_id`, `activity`, `timestamp`;
+- невалидные даты;
+- дубли событий;
+- отрицательные длительности;
+- кейсы с одним событием;
+- пропущенные частые этапы;
+- повторные возвраты;
+- редкие маршруты;
+- outlier-длительности.
 
-## Process Graph
+## Визуализация process graph
 
-After `event_log.xlsx` is built:
+После сборки `event_log.xlsx` граф можно построить так:
 
 ```python
 import pandas as pd
@@ -323,11 +430,23 @@ viewer = ProcessGraphViewer(
 viewer.show()
 ```
 
-The graph is top-to-bottom and shows operation counts in node labels. Edge labels show transition counts.
+Граф строится сверху вниз. В узлах показывается количество операций, на ребрах - количество переходов.
 
-## Notes
+## Что не попадает в git
 
-- `join_plan.json` is more important than a single generated `event_log.xlsx`.
-- The LLM should return structured JSON for decisions.
-- Pandas remains responsible for all deterministic data operations.
-- Jupyter is the operator interface, not the business logic layer.
+В `.gitignore` исключены:
+
+- локальные файлы данных в `data/`;
+- runtime-память `app/memory/session_state.json`;
+- сгенерированные отчеты в `outputs/`;
+- кэши Python и Jupyter.
+
+Папки `data/` и `outputs/` остаются в проекте через `.gitkeep`, но реальные данные и результаты работы агента не должны попадать в индекс git.
+
+## Ключевые принципы
+
+- `join_plan.json` важнее, чем разово собранный `event_log.xlsx`.
+- LLM должна возвращать структурированное решение, а не свободный текст.
+- pandas отвечает за все детерминированные операции с данными.
+- Jupyter Widget является интерфейсом оператора, а не слоем бизнес-логики.
+- Память сессии нужна для правок пользователя и повторной сборки.
