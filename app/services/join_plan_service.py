@@ -27,7 +27,6 @@ def _pick_column(
         return None
 
     used_columns = used_columns or set()
-
     available = [
         value for value in values
         if value not in used_columns
@@ -74,27 +73,16 @@ def _score_base_table(table_info: dict) -> int:
 
 
 def choose_base_table(tables_info: dict) -> str | None:
-    """
-    Выбирает базовую таблицу для event log.
-
-    Идеально, если в таблице есть:
-    - case_id
-    - activity
-    - timestamp
-    """
-
     candidates = []
 
     for table_name, info in tables_info.items():
         if "error" in info:
             continue
 
-        score = _score_base_table(info)
-
         candidates.append(
             {
                 "table_name": table_name,
-                "score": score,
+                "score": _score_base_table(info),
             }
         )
 
@@ -167,19 +155,19 @@ def build_event_tables_concat_plan(
     tables_info: dict,
     user_requirements: dict | None = None,
 ) -> dict:
-    """
-    Строит план, где каждый файл является источником событий.
-
-    В этом режиме activity берется из имени файла, а case_id/timestamp
-    подбираются отдельно для каждой таблицы.
-    """
-
     user_requirements = user_requirements or {}
     event_sources = []
     warnings = []
     errors = []
+    requested_tables = user_requirements.get("selected_tables")
+
+    if requested_tables:
+        requested_tables = set(requested_tables)
 
     for table_name, table_info in tables_info.items():
+        if requested_tables and table_name not in requested_tables:
+            continue
+
         if "error" in table_info:
             warnings.append(f"{table_name}: таблица пропущена, ошибка чтения.")
             continue
@@ -197,6 +185,7 @@ def build_event_tables_concat_plan(
                 "application_id",
                 "app_id",
                 "deal_id",
+                "doc_id",
                 "id",
             ],
             used_columns=used_columns,
@@ -217,6 +206,7 @@ def build_event_tables_concat_plan(
                 "event_time",
                 "created_at",
                 "updated_at",
+                "operation_date",
                 "date",
                 "time",
                 "start_time",
@@ -260,52 +250,34 @@ def build_event_tables_concat_plan(
             used_columns=None,
         )
 
-        source = {
-            "file": table_name,
-            "activity": _table_name_to_activity(table_name),
-            "activity_source": "table_name",
-            "case_id": case_id_col,
-            "timestamp": timestamp_col,
-            "start_time": start_time_col,
-            "stop_time": stop_time_col,
-            "rows": table_info.get("rows"),
-        }
-
-        if not case_id_col:
-            errors.append(f"{table_name}: не удалось определить case_id.")
-
-        if not timestamp_col:
-            errors.append(f"{table_name}: не удалось определить timestamp.")
-
-        event_sources.append(source)
+        if case_id_col and timestamp_col:
+            event_sources.append(
+                {
+                    "file": table_name,
+                    "activity": _table_name_to_activity(table_name),
+                    "activity_source": "table_name",
+                    "case_id": case_id_col,
+                    "timestamp": timestamp_col,
+                    "start_time": start_time_col,
+                    "stop_time": stop_time_col,
+                    "rows": table_info.get("rows"),
+                }
+            )
+        else:
+            warnings.append(
+                f"{table_name}: пропущена для concat, "
+                f"case_id={case_id_col}, timestamp={timestamp_col}"
+            )
 
     if not event_sources:
         return {
             "status": "error",
             "mode": "event_tables_concat",
-            "error": "Не найдено таблиц для сборки event log через concat.",
+            "error": "Не найдено таблиц для concat с case_id и timestamp.",
             "event_sources": [],
             "warnings": warnings,
             "errors": errors,
-        }
-
-    if errors:
-        return {
-            "status": "error",
-            "mode": "event_tables_concat",
-            "error": "Не все event-таблицы имеют обязательные поля.",
-            "event_sources": event_sources,
-            "event_log_columns": {
-                "case_id": "case_id",
-                "activity": "activity",
-                "activity_id": "activity_id",
-                "timestamp": "timestamp",
-                "start_time": "start_time",
-                "stop_time": "stop_time",
-            },
             "joins": [],
-            "warnings": warnings,
-            "errors": errors,
         }
 
     return {
@@ -324,6 +296,7 @@ def build_event_tables_concat_plan(
         },
         "joins": [],
         "warnings": warnings,
+        "errors": errors,
         "output_columns": {
             "case_id": "case_id",
             "activity": "activity",
@@ -336,20 +309,62 @@ def build_event_tables_concat_plan(
     }
 
 
+def _build_user_selected_joins(
+    base_table: str,
+    user_requirements: dict,
+) -> tuple[list[dict], list[str]]:
+    joins = []
+    warnings = []
+    selected_joins = user_requirements.get("selected_joins") or []
+
+    for selected_join in selected_joins:
+        left_table = selected_join.get("left_table")
+        right_table = selected_join.get("right_table")
+        left_key = selected_join.get("left_key")
+        right_key = selected_join.get("right_key")
+
+        if left_table == base_table:
+            joins.append(
+                {
+                    "right_table": right_table,
+                    "left_key": left_key,
+                    "right_key": right_key,
+                    "how": selected_join.get("how", "left"),
+                    "source": "user",
+                }
+            )
+        elif right_table == base_table:
+            joins.append(
+                {
+                    "right_table": left_table,
+                    "left_key": right_key,
+                    "right_key": left_key,
+                    "how": selected_join.get("how", "left"),
+                    "source": "user",
+                }
+            )
+        else:
+            warnings.append(
+                "Join пропущен, потому что ни одна из таблиц не является "
+                f"базовой: {left_table} <-> {right_table}"
+            )
+
+    if not joins:
+        warnings.append(
+            "Автоматические join не применены. "
+            "Найденные связи используются только как подсказки. "
+            "Чтобы добавить join, напиши явно: "
+            "`join table1.xlsx.id = table2.xlsx.id`."
+        )
+
+    return joins, warnings
+
+
 def build_join_plan(
     tables_info: dict,
     relationships: list[dict],
     user_requirements: dict | None = None,
 ) -> dict:
-    """
-    Строит предварительный join_plan.
-
-    Пока это эвристика без Qwen:
-    - выбирает базовую таблицу
-    - выбирает case_id/activity/timestamp
-    - добавляет возможные left join по найденным связям
-    """
-
     user_requirements = user_requirements or {}
 
     if _is_event_tables_concat_mode(user_requirements):
@@ -363,26 +378,45 @@ def build_join_plan(
     if base_table is None:
         return {
             "status": "error",
+            "mode": "joined_table",
             "error": "Не удалось выбрать базовую таблицу для event log.",
         }
 
     if base_table not in tables_info:
         return {
             "status": "error",
+            "mode": "joined_table",
             "error": f"Базовая таблица не найдена: {base_table}",
             "base_table": base_table,
+            "available_tables": list(tables_info.keys()),
         }
 
     base_info = tables_info[base_table]
-    base_columns = base_info.get("columns", [])
 
+    if "error" in base_info:
+        return {
+            "status": "error",
+            "mode": "joined_table",
+            "error": f"Ошибка чтения базовой таблицы {base_table}: {base_info['error']}",
+            "base_table": base_table,
+        }
+
+    base_columns = base_info.get("columns", [])
     used_columns = set()
 
     case_id_col = (
         _resolve_column(user_requirements.get("case_id"), base_columns)
         or _pick_column(
             base_info.get("candidate_case_id_columns", []),
-            preferred_names=["case_id", "caseid", "request_id", "application_id", "id"],
+            preferred_names=[
+                "case_id",
+                "caseid",
+                "request_id",
+                "application_id",
+                "deal_id",
+                "doc_id",
+                "id",
+            ],
             used_columns=used_columns,
         )
     )
@@ -394,7 +428,17 @@ def build_join_plan(
         _resolve_column(user_requirements.get("activity"), base_columns)
         or _pick_column(
             base_info.get("candidate_activity_columns", []),
-            preferred_names=["activity", "event", "event_name", "status", "operation"],
+            preferred_names=[
+                "activity",
+                "event",
+                "event_name",
+                "status",
+                "status_name",
+                "operation",
+                "operation_name",
+                "opname",
+                "stage",
+            ],
             used_columns=used_columns,
         )
     )
@@ -406,26 +450,39 @@ def build_join_plan(
         _resolve_column(user_requirements.get("timestamp"), base_columns)
         or _pick_column(
             base_info.get("candidate_timestamp_columns", []),
-            preferred_names=["timestamp", "event_time", "created_at", "updated_at", "date"],
+            preferred_names=[
+                "timestamp",
+                "event_time",
+                "created_at",
+                "updated_at",
+                "operation_date",
+                "date",
+                "time",
+            ],
             used_columns=used_columns,
         )
     )
 
     requested_columns = {
-        "case_id": case_id_col if user_requirements.get("case_id") else None,
-        "activity": activity_col if user_requirements.get("activity") else None,
-        "timestamp": timestamp_col if user_requirements.get("timestamp") else None,
+        "case_id": user_requirements.get("case_id"),
+        "activity": user_requirements.get("activity"),
+        "timestamp": user_requirements.get("timestamp"),
     }
+    missing_requested_columns = []
 
-    missing_requested_columns = [
-        f"{role}={column}"
-        for role, column in requested_columns.items()
-        if column and column not in base_columns
-    ]
+    for role, requested in requested_columns.items():
+        if not requested:
+            continue
+
+        resolved = _resolve_column(requested, base_columns)
+
+        if resolved not in base_columns:
+            missing_requested_columns.append(f"{role}={requested}")
 
     if missing_requested_columns:
         return {
             "status": "error",
+            "mode": "joined_table",
             "error": (
                 "В базовой таблице нет колонок, указанных пользователем: "
                 f"{missing_requested_columns}"
@@ -434,51 +491,38 @@ def build_join_plan(
             "available_columns": base_columns,
         }
 
-    if not case_id_col or not activity_col or not timestamp_col:
+    missing_roles = []
+
+    if not case_id_col:
+        missing_roles.append("case_id")
+
+    if not activity_col:
+        missing_roles.append("activity")
+
+    if not timestamp_col:
+        missing_roles.append("timestamp")
+
+    if missing_roles:
         return {
             "status": "error",
+            "mode": "joined_table",
             "error": (
-                "Не удалось автоматически определить обязательные поля "
-                "case_id/activity/timestamp."
+                "Не удалось определить обязательные поля: "
+                f"{missing_roles}"
             ),
             "base_table": base_table,
             "case_id": case_id_col,
             "activity": activity_col,
             "timestamp": timestamp_col,
+            "available_columns": base_columns,
         }
 
-    joins = []
-    used_right_tables = set()
+    joins, warnings = _build_user_selected_joins(
+        base_table=base_table,
+        user_requirements=user_requirements,
+    )
 
-    for rel in relationships:
-        left_table = rel["left_table"]
-        right_table = rel["right_table"]
-
-        if left_table == base_table and right_table not in used_right_tables:
-            joins.append(
-                {
-                    "right_table": right_table,
-                    "left_key": rel["left_column"],
-                    "right_key": rel["right_column"],
-                    "how": "left",
-                    "relationship_score": rel["score"],
-                }
-            )
-            used_right_tables.add(right_table)
-
-        elif right_table == base_table and left_table not in used_right_tables:
-            joins.append(
-                {
-                    "right_table": left_table,
-                    "left_key": rel["right_column"],
-                    "right_key": rel["left_column"],
-                    "how": "left",
-                    "relationship_score": rel["score"],
-                }
-            )
-            used_right_tables.add(left_table)
-
-    join_plan = {
+    return {
         "status": "ok",
         "mode": "joined_table",
         "base_table": base_table,
@@ -488,11 +532,11 @@ def build_join_plan(
             "timestamp": timestamp_col,
         },
         "joins": joins,
+        "warnings": warnings,
+        "errors": [],
         "output_columns": {
             "case_id": case_id_col,
             "activity": activity_col,
             "timestamp": timestamp_col,
         },
     }
-
-    return join_plan

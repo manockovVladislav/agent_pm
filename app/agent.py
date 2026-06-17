@@ -8,6 +8,12 @@ from app.services.session_service import reset_session_state
 class ProcessMiningDataAgent:
     """
     Главный класс агента для Jupyter-чата.
+
+    Логика:
+    - общение идет через app/ui/chat_widget.py;
+    - управление состояниями идет через LangGraph;
+    - агент сам анализирует data/ и строит preview;
+    - финальный event_log собирается только после подтверждения.
     """
 
     def __init__(self, data_dir: str | Path = DATA_DIR):
@@ -19,33 +25,29 @@ class ProcessMiningDataAgent:
         initial_state = {
             "user_question": user_question,
             "data_dir": self.data_dir,
-
             "session_state": None,
+            "user_intent": None,
+            "dialog_phase": None,
             "parsed_requirements": None,
             "user_requirements": None,
-            "agent_iteration": 0,
-            "max_agent_iterations": 2,
-            "agent_decision": None,
-            "agent_decision_history": [],
-
             "files": None,
             "tables_info": None,
-
             "relationships": None,
+            "proposed_strategies": None,
+            "selected_strategy": None,
             "join_plan": None,
             "join_validation_report": None,
-
+            "preview_event_log": None,
+            "preview_validation_report": None,
+            "preview_output_paths": None,
             "event_log": None,
             "validation_report": None,
             "output_paths": None,
             "session_path": None,
-            "llm_response": None,
-
             "answer": None,
         }
 
         result = self.graph.invoke(initial_state)
-
         self.last_state = result
 
         return result["answer"]

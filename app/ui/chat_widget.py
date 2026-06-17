@@ -387,9 +387,10 @@ class AgentChatWidget:
 
     def _on_example_clicked(self, button):
         self.input_box.value = (
-            "Проанализируй таблицы в папке data, "
-            "найди пропуски, дубли, возможные ключи связи "
-            "и предложи структуру event log."
+            "Помоги собрать лог событий. "
+            "Посмотри таблицы в папке data, найди кандидаты на case_id, "
+            "activity, timestamp, предложи стратегию сборки event log "
+            "и сначала собери preview."
         )
 
     def _set_buttons_disabled(self, disabled: bool):
