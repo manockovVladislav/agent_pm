@@ -13,8 +13,11 @@ DEFAULT_SESSION_STATE = {
     "dialog_step": 0,
     "max_dialog_steps": 30,
     "user_requirements": {},
+    "data_fingerprint": None,
+    "data_warning": None,
     "files": [],
     "tables_info": {},
+    "table_classifications": {},
     "relationships": [],
     "proposed_strategies": [],
     "selected_strategy": None,
@@ -26,6 +29,19 @@ DEFAULT_SESSION_STATE = {
     "last_output_paths": None,
     "history": [],
 }
+
+
+def build_data_fingerprint(files: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    files = files or []
+
+    return [
+        {
+            "file_name": file_info.get("file_name"),
+            "size_bytes": file_info.get("size_bytes"),
+            "modified_at": file_info.get("modified_at"),
+        }
+        for file_info in sorted(files, key=lambda item: str(item.get("file_name")))
+    ]
 
 
 def _empty_session_state() -> dict[str, Any]:
@@ -106,6 +122,7 @@ def update_session_after_run(
     parsed_requirements: dict[str, Any] | None,
     files: list[dict[str, Any]] | None,
     tables_info: dict[str, Any] | None,
+    table_classifications: dict[str, Any] | None,
     relationships: list[dict[str, Any]] | None,
     proposed_strategies: list[dict[str, Any]] | None,
     selected_strategy: dict[str, Any] | None,
@@ -115,14 +132,24 @@ def update_session_after_run(
     preview_output_paths: dict[str, str] | None,
     validation_report: dict[str, Any] | None,
     output_paths: dict[str, str] | None,
+    data_fingerprint: list[dict[str, Any]] | None = None,
+    data_warning: str | None = None,
 ) -> dict[str, Any]:
     updated = copy.deepcopy(session_state)
 
     if files is not None:
         updated["files"] = files
 
+    if data_fingerprint is not None:
+        updated["data_fingerprint"] = data_fingerprint
+
+    updated["data_warning"] = data_warning
+
     if tables_info is not None:
         updated["tables_info"] = tables_info
+
+    if table_classifications is not None:
+        updated["table_classifications"] = table_classifications
 
     if relationships is not None:
         updated["relationships"] = relationships
@@ -178,6 +205,7 @@ def update_session_after_run(
             "final_status": (
                 None if not validation_report else validation_report.get("status")
             ),
+            "data_warning": data_warning,
         }
     )
 

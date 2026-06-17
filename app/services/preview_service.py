@@ -7,6 +7,37 @@ from app.services.output_service import save_json
 from app.services.validation_service import validate_event_log
 
 
+def _preview_sample_rows(
+    preview_event_log: pd.DataFrame,
+    limit: int = 10,
+) -> list[dict]:
+    preferred_columns = [
+        "case_id",
+        "activity",
+        "timestamp",
+        "start_time",
+        "stop_time",
+        "source_table",
+    ]
+    columns = [
+        column for column in preferred_columns
+        if column in preview_event_log.columns
+    ]
+
+    if not columns:
+        columns = list(preview_event_log.columns[:6])
+
+    sample_df = preview_event_log[columns].head(limit).copy()
+
+    return [
+        {
+            str(key): "" if pd.isna(value) else str(value)
+            for key, value in row.items()
+        }
+        for row in sample_df.to_dict(orient="records")
+    ]
+
+
 def build_preview_event_log(
     event_log: pd.DataFrame | None,
     max_rows: int = 1000,
@@ -70,6 +101,7 @@ def validate_preview_event_log(preview_event_log: pd.DataFrame | None) -> dict:
         }
 
     report = validate_event_log(preview_event_log)
+    report["sample_rows"] = _preview_sample_rows(preview_event_log)
     suggestions = []
 
     if report.get("missing_timestamp", 0) > 0:
@@ -86,6 +118,11 @@ def validate_preview_event_log(preview_event_log: pd.DataFrame | None) -> dict:
 
     if report.get("invalid_timestamp", 0) > 0:
         suggestions.append("проверить формат даты в timestamp")
+
+    if report.get("cases_with_same_timestamp_multi_activity", 0) > 0:
+        suggestions.append(
+            "проверить timestamp: внутри части case разные activity имеют одинаковое время"
+        )
 
     report["suggestions"] = suggestions
 

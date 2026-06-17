@@ -12,9 +12,11 @@ class EventLogBuildState(TypedDict):
 
     parsed_requirements: dict[str, Any] | None
     user_requirements: dict[str, Any] | None
+    session_warnings: list[str] | None
 
     files: list[dict[str, Any]] | None
     tables_info: dict[str, Any] | None
+    table_classifications: dict[str, Any] | None
     relationships: list[dict[str, Any]] | None
 
     proposed_strategies: list[dict[str, Any]] | None

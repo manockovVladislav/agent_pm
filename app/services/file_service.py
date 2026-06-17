@@ -24,6 +24,8 @@ def scan_data_directory(data_dir: str | Path) -> list[dict]:
                     "path": str(path),
                     "extension": path.suffix.lower(),
                     "size_mb": round(path.stat().st_size / 1024 / 1024, 3),
+                    "size_bytes": path.stat().st_size,
+                    "modified_at": int(path.stat().st_mtime),
                 }
             )
 

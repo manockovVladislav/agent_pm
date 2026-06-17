@@ -223,6 +223,42 @@ def validate_event_log(event_log: pd.DataFrame) -> dict:
         report["cases_with_missing_common_stages"] = int(missing_common_stage_cases)
         report["cases_with_repeated_returns"] = int(repeated_return_cases)
 
+    clean_time_activity_log = event_log.dropna(
+        subset=[
+            "case_id",
+            "activity",
+            "timestamp",
+        ]
+    ).copy()
+
+    if clean_time_activity_log.empty:
+        report["cases_with_same_timestamp_multi_activity"] = 0
+        report["same_timestamp_multi_activity_events"] = 0
+    else:
+        same_timestamp_cases = 0
+        same_timestamp_events = 0
+
+        for _, case_group in clean_time_activity_log.groupby("case_id"):
+            timestamp_activity_counts = (
+                case_group
+                .groupby("timestamp")["activity"]
+                .nunique(dropna=True)
+            )
+            problematic_timestamps = timestamp_activity_counts[
+                timestamp_activity_counts > 1
+            ]
+
+            if not problematic_timestamps.empty:
+                same_timestamp_cases += 1
+                same_timestamp_events += int(
+                    case_group[
+                        case_group["timestamp"].isin(problematic_timestamps.index)
+                    ].shape[0]
+                )
+
+        report["cases_with_same_timestamp_multi_activity"] = int(same_timestamp_cases)
+        report["same_timestamp_multi_activity_events"] = int(same_timestamp_events)
+
     if clean_log.empty:
         report["outlier_case_duration_count"] = 0
         report["outlier_case_duration_threshold_hours"] = None

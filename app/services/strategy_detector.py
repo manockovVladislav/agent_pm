@@ -93,7 +93,32 @@ def _safe_div(a: float, b: float) -> float:
     return a / b
 
 
-def _score_single_event_table(table_name: str, table_info: dict) -> dict | None:
+def _missing_percent(table_info: dict, column: str | None) -> float:
+    if not column:
+        return 100.0
+
+    return float(_column_profile(table_info, column).get("missing_percent") or 0.0)
+
+
+def _unique_count(table_info: dict, column: str | None) -> int:
+    if not column:
+        return 0
+
+    return int(_column_profile(table_info, column).get("unique_count") or 0)
+
+
+def _format_bad_sources(values: list[str], limit: int = 3) -> str:
+    shown = values[:limit]
+    suffix = "" if len(values) <= limit else f" и еще {len(values) - limit}"
+
+    return ", ".join(shown) + suffix
+
+
+def _score_single_event_table(
+    table_name: str,
+    table_info: dict,
+    table_classification: dict | None = None,
+) -> dict | None:
     if "error" in table_info:
         return None
 
@@ -128,61 +153,114 @@ def _score_single_event_table(table_name: str, table_info: dict) -> dict | None:
         used=used,
     )
 
-    case_profile = _column_profile(table_info, case_id)
-    activity_profile = _column_profile(table_info, activity)
-
-    case_unique = int(case_profile.get("unique_count") or 0)
-    activity_unique = int(activity_profile.get("unique_count") or 0)
+    case_unique = _unique_count(table_info, case_id)
+    activity_unique = _unique_count(table_info, activity)
+    case_missing_percent = _missing_percent(table_info, case_id)
+    activity_missing_percent = _missing_percent(table_info, activity)
+    timestamp_missing_percent = _missing_percent(table_info, timestamp)
     avg_events_per_case = round(_safe_div(rows, case_unique), 2)
 
     score = 0
     reasons = []
     risks = []
+    table_classification = table_classification or {}
+    table_role = table_classification.get("role")
+
+    if table_role == "event_table":
+        score += 18
+        reasons.append("таблица классифицирована как event_table")
+    elif table_role == "lifecycle_table":
+        score -= 10
+        risks.append("таблица похожа на lifecycle table, activity может быть неявной")
+    elif table_role == "attribute_table":
+        score -= 30
+        risks.append("таблица похожа на справочник/атрибуты, а не на события")
+    elif table_role == "bridge_table":
+        score -= 35
+        risks.append("таблица похожа на bridge table")
+    elif table_role == "noise_table":
+        score -= 25
 
     if case_id:
         score += 25
         reasons.append(f"найден case_id `{case_id}`")
+
+        if case_missing_percent == 0:
+            score += 8
+            reasons.append("case_id без пропусков")
+        elif case_missing_percent <= 5:
+            score += 3
+            risks.append(f"case_id содержит пропуски: {case_missing_percent}%")
+        else:
+            score -= 12
+            risks.append(f"много пропусков case_id: {case_missing_percent}%")
     else:
         risks.append("не найден надежный case_id")
 
     if activity:
         score += 30
         reasons.append(f"найден activity `{activity}`")
+
+        if activity_missing_percent == 0:
+            score += 5
+        elif activity_missing_percent > 10:
+            score -= 10
+            risks.append(f"много пропусков activity: {activity_missing_percent}%")
     else:
         risks.append("не найдено поле activity/status/operation")
 
     if timestamp:
         score += 30
         reasons.append(f"найден timestamp `{timestamp}`")
+
+        if timestamp_missing_percent == 0:
+            score += 10
+            reasons.append("timestamp без пропусков")
+        elif timestamp_missing_percent <= 5:
+            score += 4
+            risks.append(f"timestamp содержит пропуски: {timestamp_missing_percent}%")
+        else:
+            score -= 18
+            risks.append(f"много пропусков timestamp: {timestamp_missing_percent}%")
     else:
         risks.append("не найден timestamp")
 
     if rows > 0 and case_unique > 0:
-        if avg_events_per_case >= 2:
+        if 2 <= avg_events_per_case <= 100:
             score += 15
             reasons.append(f"в среднем {avg_events_per_case} событий на case_id")
+        elif avg_events_per_case > 100:
+            score -= 10
+            risks.append("слишком много событий на case_id, возможен неверный ключ")
         else:
+            score -= 10
             risks.append("case_id почти уникален, возможно это event_id")
 
     if activity_unique > 0:
-        if 2 <= activity_unique <= 100:
+        activity_unique_ratio = _safe_div(activity_unique, rows)
+
+        if 2 <= activity_unique <= 100 and activity_unique_ratio <= 0.5:
             score += 10
             reasons.append(f"разумное число activity: {activity_unique}")
+        elif activity_unique_ratio > 0.8:
+            score -= 25
+            risks.append("activity почти уникальна, возможно выбрано не то поле")
         elif activity_unique > 500:
             score -= 15
-            risks.append("activity почти уникальна, возможно выбрано не то поле")
+            risks.append("слишком много разных activity")
 
     if rows < 2:
         score -= 20
         risks.append("слишком мало строк")
 
-    confidence = max(0.0, min(score / 110, 1.0))
+    confidence = max(0.0, min(score / 151, 1.0))
 
     if not case_id or not activity or not timestamp:
         confidence = min(confidence, 0.45)
 
     return {
         "strategy_id": "single_event_table",
+        "strategy_key": f"single_event_table:{table_name}",
         "title": "Одна таблица уже похожа на event log",
         "confidence": round(confidence, 2),
         "table": table_name,
@@ -193,6 +271,12 @@ def _score_single_event_table(table_name: str, table_info: dict) -> dict | None:
         "rows": rows,
         "avg_events_per_case": avg_events_per_case,
         "activity_unique_count": activity_unique,
+        "table_role": table_role,
+        "quality_signals": {
+            "case_missing_percent": case_missing_percent,
+            "activity_missing_percent": activity_missing_percent,
+            "timestamp_missing_percent": timestamp_missing_percent,
+        },
         "plan_mode": "joined_table",
         "joins": [],
         "reason": "; ".join(reasons) if reasons else "эвристика не нашла сильных признаков",
@@ -238,12 +322,15 @@ def _score_concat_strategy(tables_info: dict) -> dict | None:
     event_sources = []
     case_columns = []
     total_rows = 0
+    valid_tables = 0
     risks = []
     reasons = []
 
     for table_name, table_info in tables_info.items():
         if "error" in table_info:
             continue
+
+        valid_tables += 1
 
         columns = table_info.get("columns") or []
         case_id = _pick_best_column(
@@ -258,6 +345,8 @@ def _score_concat_strategy(tables_info: dict) -> dict | None:
         )
 
         if case_id and timestamp:
+            case_missing_percent = _missing_percent(table_info, case_id)
+            timestamp_missing_percent = _missing_percent(table_info, timestamp)
             event_sources.append(
                 {
                     "file": table_name,
@@ -265,6 +354,8 @@ def _score_concat_strategy(tables_info: dict) -> dict | None:
                     "case_id": case_id,
                     "timestamp": timestamp,
                     "rows": table_info.get("rows"),
+                    "case_missing_percent": case_missing_percent,
+                    "timestamp_missing_percent": timestamp_missing_percent,
                 }
             )
             case_columns.append(columns)
@@ -293,10 +384,31 @@ def _score_concat_strategy(tables_info: dict) -> dict | None:
     if total_rows > 0:
         score += 15
 
-    confidence = max(0.0, min(score / 80, 1.0))
+    coverage = _safe_div(len(event_sources), valid_tables)
+
+    if coverage >= 0.8:
+        score += 15
+        reasons.append(f"подходит {round(coverage * 100)}% таблиц")
+    elif coverage < 0.5:
+        score -= 15
+        risks.append(f"для concat подходит только {round(coverage * 100)}% таблиц")
+
+    bad_sources = [
+        source["file"]
+        for source in event_sources
+        if source["case_missing_percent"] > 10
+        or source["timestamp_missing_percent"] > 10
+    ]
+
+    if bad_sources:
+        score -= min(len(bad_sources) * 10, 25)
+        risks.append(f"есть таблицы с пропусками ключевых полей: {_format_bad_sources(bad_sources)}")
+
+    confidence = max(0.0, min(score / 95, 1.0))
 
     return {
         "strategy_id": "event_tables_concat",
+        "strategy_key": "event_tables_concat",
         "title": "Несколько таблиц как отдельные события",
         "confidence": round(confidence, 2),
         "plan_mode": "event_tables_concat",
@@ -359,6 +471,7 @@ def _score_base_with_joins_strategy(
 
     return {
         "strategy_id": "base_table_with_joins",
+        "strategy_key": f"base_table_with_joins:{base_table}",
         "title": "Основная таблица событий + справочники через left join",
         "confidence": round(min(confidence, 0.75), 2),
         "plan_mode": "joined_table",
@@ -381,14 +494,17 @@ def _score_base_with_joins_strategy(
 def detect_strategies(
     tables_info: dict,
     relationships: list[dict],
+    table_classifications: dict | None = None,
 ) -> list[dict]:
     strategies = []
     single_candidates = []
+    table_classifications = table_classifications or {}
 
     for table_name, table_info in tables_info.items():
         strategy = _score_single_event_table(
             table_name=table_name,
             table_info=table_info,
+            table_classification=table_classifications.get(table_name),
         )
 
         if strategy:
@@ -401,7 +517,7 @@ def detect_strategies(
     )
 
     if single_candidates:
-        strategies.append(single_candidates[0])
+        strategies.extend(single_candidates[:2])
 
     concat_strategy = _score_concat_strategy(tables_info)
 
@@ -427,7 +543,7 @@ def detect_strategies(
         strategy["number"] = index
         strategy["recommended"] = index == 1
 
-    return strategies[:3]
+    return strategies[:5]
 
 
 def strategy_to_user_requirements(strategy: dict) -> dict:
